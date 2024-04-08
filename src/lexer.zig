@@ -122,7 +122,7 @@ pub const Lexer = struct {
 
     pub fn print(self: Lexer, token: Token, writer: anytype) void {
         const input = token.getLiteral(self.input);
-        writer.print("{s}: [{d}, {d}] '{s}'\n", .{ @tagName(token.type), token.start_pos, token.end_pos, input });
+        writer.print("{s}: [{d}, {d}] '{s}'", .{ @tagName(token.type), token.start_pos, token.end_pos, input });
     }
 
     //shorthand for consuming a token thats a single char

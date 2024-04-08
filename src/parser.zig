@@ -59,7 +59,67 @@ pub const Parser = struct {
         }
     }
 
+    pub fn print(self: *const Parser) void {
+        for (self.nodes.items, 0..) |node, idx| {
+            std.debug.print("[id={d} ", .{idx});
+            self.printNode(node, 0);
+            std.debug.print("]\n", .{});
+        }
+    }
+
     //end public interface
+    fn printNode(self: *const Parser, node: ast.Node, indent: u32) void {
+        printIndent(indent);
+        switch (node) {
+            .atom => |x| self.lexer.print(x.symbol, std.debug),
+            .infix_expression => |x| self.printInfix(x, indent + 1),
+            .block_expression => |x| {
+                std.debug.print("(", .{});
+                for (x.expressions.items) |n| {
+                    std.debug.print("\n", .{});
+                    self.printNode(self.getNode(n).*, indent + 1);
+                }
+                std.debug.print(")", .{});
+            },
+            .negation => |x| {
+                std.debug.print("(", .{});
+                self.lexer.print(x.symbol, std.debug);
+                std.debug.print("\n", .{});
+                self.printNode(self.getNode(x.right).*, indent + 1);
+                std.debug.print(")", .{});
+            },
+            else => {},
+        }
+    }
+
+    fn printIndent(indent: u32) void {
+        for (0..indent) |_| std.debug.print("\t", .{});
+    }
+
+    fn printInfix(self: *const Parser, infix: ast.InfixExpression, indent: u32) void {
+        const left = switch (infix) {
+            inline else => |x| self.getNode(x.left),
+        };
+        const right = switch (infix) {
+            inline else => |x| self.getNode(x.right),
+        };
+        const symbol = switch (infix) {
+            inline else => |x| x.symbol,
+        };
+
+        std.debug.print("(", .{});
+        self.lexer.print(symbol, std.debug);
+
+        std.debug.print("\n", .{});
+        self.printNode(left.*, indent);
+
+        std.debug.print("\n", .{});
+        self.printNode(right.*, indent);
+
+        std.debug.print("\n", .{});
+        printIndent(indent);
+        std.debug.print(")\n", .{});
+    }
 
     //move the parsing cursor forward by a token, setting the current and look ahead token
     fn nextToken(self: *Parser) void {
@@ -74,6 +134,7 @@ pub const Parser = struct {
             ast.InfixExpression => ast.Node{ .infix_expression = new_node },
             ast.Negation => ast.Node{ .negation = new_node },
             ast.BlockExpression => ast.Node{ .block_expression = new_node },
+            ast.Eof => ast.Node{ .eof = new_node },
             else => {
                 std.debug.print("Unhandled type: {s}\n", .{@typeName(T)});
                 @panic("Unhandled type!");
@@ -85,7 +146,7 @@ pub const Parser = struct {
     }
 
     //return a node from the array list based on index
-    fn getNode(self: *Parser, index: usize) *ast.Node {
+    fn getNode(self: *const Parser, index: usize) *ast.Node {
         assert(index < self.nodes.items.len);
 
         return &self.nodes.items[index];
@@ -95,8 +156,10 @@ pub const Parser = struct {
     fn getPrefixFn(token: Lexer.Token.Type, peek: Lexer.Token.Type) ?*const fn (*Parser) usize {
         return switch (token) {
             //if the token after a symbol is a paren, assume its a predicate like 'P(x)' instead of just an atom 'x'
-            .SYMBOL => if (peek != .LPAREN) parseAtom else unreachable,
+            .SYMBOL => if (peek != .LPAREN) parseAtom else null,
             .LPAREN => parseBlockExpression,
+            .NEG => parseNegation,
+            .EOF => parseEof,
             else => null,
         };
     }
@@ -118,16 +181,19 @@ pub const Parser = struct {
         }
 
         const prefix_fn = prefix_fn_maybe.?;
-        const left_expr = prefix_fn(self);
+        var left_expr = prefix_fn(self);
 
-        const infix_fn_maybe = getInfixFn(self.peek_token.type);
-        if (infix_fn_maybe == null) {
-            return left_expr;
+        while (self.peek_token.type != .EOF) {
+            const infix_fn_maybe = getInfixFn(self.peek_token.type);
+            if (infix_fn_maybe == null) {
+                return left_expr;
+            }
+
+            self.nextToken();
+            const infix_fn = infix_fn_maybe.?;
+            left_expr = infix_fn(self, left_expr);
         }
-
-        self.nextToken();
-        const infix_fn = infix_fn_maybe.?;
-        return infix_fn(self, left_expr);
+        return left_expr;
     }
 
     //expressions that has an expression to the left and right of it
@@ -151,10 +217,8 @@ pub const Parser = struct {
         const expr = &self.getNode(index).infix_expression;
 
         switch (expr.*) {
-            .conditional => |*c| c.right = self.parseExpression().?,
-            .biconditional => |*b| b.right = self.parseExpression().?,
-            .conjunction => |*c| c.right = self.parseExpression().?,
-            .disjunction => |*d| d.right = self.parseExpression().?,
+            //todo: handle null expression case
+            inline .conditional, .biconditional, .conjunction, .disjunction => |*x| x.right = self.parseExpression().?,
         }
 
         return index;
@@ -212,8 +276,7 @@ pub const Parser = struct {
         const index = self.addNewNode(ast.BlockExpression, block);
         var node = self.getNode(index);
 
-        while (self.current_token.type != .RPAREN) : (self.nextToken()) {
-            //todo check if eof
+        while (self.current_token.type != .RPAREN and self.current_token.type != .EOF) : (self.nextToken()) {
             const expr_maybe = self.parseExpression();
             if (expr_maybe == null) continue;
 
@@ -221,13 +284,20 @@ pub const Parser = struct {
             node.block_expression.expressions.append(expr) catch @panic("OOM");
         }
 
-        //consume ')'
-        self.nextToken();
+        //todo handle err
+        if (self.current_token.type != .RPAREN) @panic("Expected )");
         return index;
+    }
+
+    fn parseEof(self: *Parser) usize {
+        const last = ast.Eof{ .symbol = self.current_token };
+        return self.addNewNode(ast.Eof, last);
     }
 
     fn parsePredicate(_: *Parser) void {}
 };
+
+//tests
 
 test "negation" {
     var parser = try Parser.init("~x", std.testing.allocator);
@@ -282,6 +352,11 @@ test "conditionals" {
 
     const cond_2 = parser.getNode(bi_cond.right).infix_expression.conditional;
     try std.testing.expectEqualDeep(atom_4, parser.getNode(cond_2.left).atom);
+
+    try parser.reset("(x ^ y) -> z");
+    parser.parse();
+    parser.print();
+    try std.testing.expectEqual(6, parser.nodes.items.len);
 }
 
 test "and / or" {
@@ -291,4 +366,11 @@ test "and / or" {
 
     const conj = parser.nodes.items[1].infix_expression.conjunction;
     try std.testing.expectEqualStrings("x", parser.getNode(conj.left).atom.symbol.getLiteral(parser.lexer.input));
+}
+
+test "printing" {
+    var parser = try Parser.init("(x ^ y) v x", std.testing.allocator);
+    defer parser.deinit();
+    parser.parse();
+    parser.print();
 }

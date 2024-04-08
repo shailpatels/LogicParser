@@ -19,6 +19,7 @@ pub fn main() !void {
             defer parser.deinit();
 
             parser.parse();
+            parser.print();
         } else {
             break;
         }
