@@ -14,6 +14,9 @@ pub const Parser = struct {
     current_token: Lexer.Token = undefined,
     peek_token: Lexer.Token = undefined,
 
+    //index to the root node, set by parse()
+    root: usize = undefined,
+
     //begin public interface
     //create a new parser
     pub fn init(input: []const u8, allocator: std.mem.Allocator) !Parser {
@@ -30,17 +33,13 @@ pub const Parser = struct {
 
     //free parser memory
     pub fn deinit(self: *Parser) void {
-        for (self.nodes.items) |node| {
-            switch (node) {
-                .block_expression => |b| b.expressions.deinit(),
-                else => {},
-            }
-        }
+        self.clearBlockExpressions();
         self.nodes.deinit();
     }
 
     //wipe the parser to an initial state
     pub fn reset(self: *Parser, new_input: []const u8) !void {
+        self.clearBlockExpressions();
         self.nodes.clearRetainingCapacity();
         self.lexer = try Lexer.init(new_input);
 
@@ -48,23 +47,28 @@ pub const Parser = struct {
         self.nextToken();
     }
 
+    fn clearBlockExpressions(self: *Parser) void {
+        for (self.nodes.items) |node| {
+            switch (node) {
+                .block_expression => |b| b.expressions.deinit(),
+                else => {},
+            }
+        }
+    }
+
     //kick off parser
     pub fn parse(self: *Parser) void {
+        //the entire expression should be parsed from a single call with 1 root returned, todo assert afterwards we're at eof
         while (self.current_token.type != .EOF) : (self.nextToken()) {
-            const statement = switch (self.current_token.type) {
-                .NEG => self.parseNegation(),
-                else => self.parseExpression(),
-            };
-            _ = statement;
+            const statement = self.parseExpression();
+            if (statement != null) self.root = statement.?;
         }
     }
 
     pub fn print(self: *const Parser) void {
-        for (self.nodes.items, 0..) |node, idx| {
-            std.debug.print("[id={d} ", .{idx});
-            self.printNode(node, 0);
-            std.debug.print("]\n", .{});
-        }
+        std.debug.print("[id={d} ", .{self.root});
+        self.printNode(self.getNode(self.root).*, 0);
+        std.debug.print("]\n", .{});
     }
 
     //end public interface
@@ -214,11 +218,13 @@ pub const Parser = struct {
         };
 
         const index = self.addNewNode(ast.InfixExpression, infix_expr);
-        const expr = &self.getNode(index).infix_expression;
+
+        const next_expr = self.parseExpression();
+        const expr = &(self.getNode(index).infix_expression);
 
         switch (expr.*) {
             //todo: handle null expression case
-            inline .conditional, .biconditional, .conjunction, .disjunction => |*x| x.right = self.parseExpression().?,
+            inline .conditional, .biconditional, .conjunction, .disjunction => |*x| x.right = next_expr.?,
         }
 
         return index;
@@ -281,7 +287,13 @@ pub const Parser = struct {
             if (expr_maybe == null) continue;
 
             const expr = expr_maybe.?;
-            node.block_expression.expressions.append(expr) catch @panic("OOM");
+
+            //retrieve node again incase the above parseExpression invalidates the original element pointer
+            node = self.getNode(index);
+            node.block_expression.expressions.append(expr) catch |err| {
+                std.debug.print("err {!}\n", .{err});
+                @panic("OOM");
+            };
         }
 
         //todo handle err
@@ -357,6 +369,9 @@ test "conditionals" {
     parser.parse();
     parser.print();
     try std.testing.expectEqual(6, parser.nodes.items.len);
+
+    try parser.reset("(x -> z) -> z -> (x)");
+    parser.parse();
 }
 
 test "and / or" {

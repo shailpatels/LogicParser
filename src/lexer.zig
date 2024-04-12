@@ -127,6 +127,9 @@ pub const Lexer = struct {
 
     //shorthand for consuming a token thats a single char
     fn buildToken(self: *const Lexer, t_type: Token.Type) Token {
+        assert(self.index + 1 <= self.input.len);
+        assert(self.index < self.input.len);
+
         return Token{
             .type = t_type,
             .start_pos = self.index,
