@@ -42,7 +42,7 @@ pub const Lexer = struct {
         };
 
         //lookup table to convert strings to a token type
-        const token_map = std.ComptimeStringMap(Type, .{
+        const token_map = std.StaticStringMap(Type).initComptime(.{
             .{ "<->", .IFF },
             .{ "->", .IF },
             .{ "\\exists", .EXISTS },
