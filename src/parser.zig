@@ -33,13 +33,13 @@ pub const Parser = struct {
 
     //free parser memory
     pub fn deinit(self: *Parser) void {
-        self.clearBlockExpressions();
+        self.clearExpressions();
         self.nodes.deinit();
     }
 
     //wipe the parser to an initial state
     pub fn reset(self: *Parser, new_input: []const u8) !void {
-        self.clearBlockExpressions();
+        self.clearExpressions();
         self.nodes.clearRetainingCapacity();
         self.lexer = try Lexer.init(new_input);
 
@@ -47,10 +47,11 @@ pub const Parser = struct {
         self.nextToken();
     }
 
-    fn clearBlockExpressions(self: *Parser) void {
+    fn clearExpressions(self: *Parser) void {
         for (self.nodes.items) |node| {
             switch (node) {
                 .block_expression => |b| b.expressions.deinit(),
+                .predicate => |p| p.variables.deinit(),
                 else => {},
             }
         }
@@ -58,11 +59,11 @@ pub const Parser = struct {
 
     //kick off parser
     pub fn parse(self: *Parser) void {
-        //the entire expression should be parsed from a single call with 1 root returned, todo assert afterwards we're at eof
-        while (self.current_token.type != .EOF) : (self.nextToken()) {
-            const statement = self.parseExpression();
-            if (statement != null) self.root = statement.?;
-        }
+        //we expect a single logic statement
+        const statement = self.parseExpression();
+        if (statement != null) self.root = statement.?;
+
+        assert(self.peek_token.type == .EOF);
     }
 
     pub fn print(self: *const Parser) void {
@@ -92,7 +93,27 @@ pub const Parser = struct {
                 self.printNode(self.getNode(x.right).*, indent + 1);
                 std.debug.print(")", .{});
             },
-            else => {},
+            .quantifier => |x| {
+                std.debug.print("(", .{});
+                self.lexer.print(x.symbol, std.debug);
+                std.debug.print(" ", .{});
+                self.lexer.print(x.variable, std.debug);
+                std.debug.print("\n", .{});
+                self.printNode(self.getNode(x.expression).*, indent + 1);
+                std.debug.print(")", .{});
+            },
+            .predicate => |x| {
+                std.debug.print("Predicate(", .{});
+                self.lexer.print(x.symbol, std.debug);
+                std.debug.print(")", .{});
+                std.debug.print("[", .{});
+                for (x.variables.items, 0..) |var_atom, i| {
+                    if (i > 0) std.debug.print(", ", .{});
+                    self.lexer.print(var_atom.symbol, std.debug);
+                }
+                std.debug.print("]", .{});
+            },
+            else => |x| std.debug.print("Unknown node type {s}\n", .{@typeName(@TypeOf(x))}),
         }
     }
 
@@ -139,6 +160,8 @@ pub const Parser = struct {
             ast.Negation => ast.Node{ .negation = new_node },
             ast.BlockExpression => ast.Node{ .block_expression = new_node },
             ast.Eof => ast.Node{ .eof = new_node },
+            ast.Predicate => ast.Node{ .predicate = new_node },
+            ast.Quantifier => ast.Node{ .quantifier = new_node },
             else => {
                 std.debug.print("Unhandled type: {s}\n", .{@typeName(T)});
                 @panic("Unhandled type!");
@@ -156,14 +179,24 @@ pub const Parser = struct {
         return &self.nodes.items[index];
     }
 
+    //return the precedence for the current token
+    fn getCurrentPrecedence(self: *Parser) u4 {
+        return self.current_token.getPrecedence();
+    }
+
+    fn getPeekPrecedence(self: *Parser) u4 {
+        return self.peek_token.getPrecedence();
+    }
+
     //given a token type return a potential prefix parsing function to handle it
     fn getPrefixFn(token: Lexer.Token.Type, peek: Lexer.Token.Type) ?*const fn (*Parser) usize {
         return switch (token) {
             //if the token after a symbol is a paren, assume its a predicate like 'P(x)' instead of just an atom 'x'
-            .SYMBOL => if (peek != .LPAREN) parseAtom else null,
+            .SYMBOL => if (peek != .LPAREN) parseAtom else parsePredicate,
             .LPAREN => parseBlockExpression,
             .NEG => parseNegation,
             .EOF => parseEof,
+            .EXISTS, .FORALL => parseQuantifier,
             else => null,
         };
     }
@@ -178,6 +211,10 @@ pub const Parser = struct {
 
     //entry point for parsing
     fn parseExpression(self: *Parser) ?usize {
+        return self.parseExpressionWithPrecedence(0);
+    }
+
+    fn parseExpressionWithPrecedence(self: *Parser, precedence: u8) ?usize {
         const prefix_fn_maybe = getPrefixFn(self.current_token.type, self.peek_token.type);
         if (prefix_fn_maybe == null) {
             std.debug.print("No prefix fn found for {s}\n", .{@tagName(self.current_token.type)});
@@ -187,7 +224,7 @@ pub const Parser = struct {
         const prefix_fn = prefix_fn_maybe.?;
         var left_expr = prefix_fn(self);
 
-        while (self.peek_token.type != .EOF) {
+        while (self.peek_token.type != .EOF and precedence < self.getPeekPrecedence()) {
             const infix_fn_maybe = getInfixFn(self.peek_token.type);
             if (infix_fn_maybe == null) {
                 return left_expr;
@@ -197,12 +234,14 @@ pub const Parser = struct {
             const infix_fn = infix_fn_maybe.?;
             left_expr = infix_fn(self, left_expr);
         }
+
         return left_expr;
     }
 
     //expressions that has an expression to the left and right of it
     fn parseInfixExpression(self: *Parser, left: usize) usize {
         const current_token = self.current_token;
+        const current_prec = self.getCurrentPrecedence();
         self.nextToken();
 
         //set right to 0, so the infix expression's index is before whatever is right of it
@@ -219,7 +258,7 @@ pub const Parser = struct {
 
         const index = self.addNewNode(ast.InfixExpression, infix_expr);
 
-        const next_expr = self.parseExpression();
+        const next_expr = self.parseExpressionWithPrecedence(current_prec);
         const expr = &(self.getNode(index).infix_expression);
 
         switch (expr.*) {
@@ -236,7 +275,7 @@ pub const Parser = struct {
         const node = self.getNode(index);
 
         self.nextToken();
-        node.negation.right = self.parseExpression().?;
+        node.negation.right = self.parseExpressionWithPrecedence(6).?;
 
         return index;
     }
@@ -306,7 +345,78 @@ pub const Parser = struct {
         return self.addNewNode(ast.Eof, last);
     }
 
-    fn parsePredicate(_: *Parser) void {}
+    fn parsePredicate(self: *Parser) usize {
+        const pred_symbol = self.current_token;
+
+        // Move to the left paren
+        self.nextToken();
+        assert(self.current_token.type == .LPAREN); //should always be '(' based on callsite
+
+        // Create the predicate with empty variables list
+        var predicate = ast.Predicate{
+            .symbol = pred_symbol,
+            .variables = std.ArrayList(ast.Atom).init(self.allocator),
+        };
+
+        // Parse arguments until we hit the right paren
+        self.nextToken();
+        while (self.current_token.type != .RPAREN) {
+            if (self.current_token.type != .SYMBOL) {
+                std.debug.print("Expected variable in predicate argument list\n", .{});
+                @panic("Parse error");
+            }
+
+            // Add the variable to our list
+            const atom = ast.Atom{ .symbol = self.current_token };
+            predicate.variables.append(atom) catch @panic("OOM");
+
+            // Move to next token
+            self.nextToken();
+
+            // If it's a comma, consume it and continue
+            if (self.current_token.type == .COMMA) {
+                self.nextToken();
+            } else if (self.current_token.type != .RPAREN) {
+                std.debug.print("Expected comma or right paren in predicate\n", .{});
+                @panic("Parse error");
+            }
+        }
+
+        // Consume the right paren
+        // self.nextToken();
+
+        return self.addNewNode(ast.Predicate, predicate);
+    }
+
+    fn parseQuantifier(self: *Parser) usize {
+        //std.debug.print("Parsing quantifier \n", .{});
+        const quantifier_token = self.current_token;
+
+        // Move past quantifier to variable
+        self.nextToken();
+
+        // The next token must be a variable (SYMBOL)
+        if (self.current_token.type != .SYMBOL) {
+            std.debug.print("Expected variable after quantifier\n", .{});
+            @panic("Parse error");
+        }
+
+        // Move past variable to the expression
+        const variable_token = self.current_token;
+        self.nextToken();
+
+        // Parse the expression that follows
+        const expression = self.parseExpressionWithPrecedence(6).?;
+        const quantifier = ast.Quantifier{
+            .symbol = quantifier_token,
+            .variable = variable_token,
+            .expression = expression,
+        };
+
+        //std.debug.print("symbol: {s}, var: {s}\n", .{ quantifier_token.getLiteral(self.lexer.input), variable_token.getLiteral(self.lexer.input) });
+
+        return self.addNewNode(ast.Quantifier, quantifier);
+    }
 };
 
 //tests
@@ -365,10 +475,12 @@ test "conditionals" {
     const cond_2 = parser.getNode(bi_cond.right).infix_expression.conditional;
     try std.testing.expectEqualDeep(atom_4, parser.getNode(cond_2.left).atom);
 
-    try parser.reset("(x ^ y) -> z");
+    try parser.reset("x ^ y -> z");
     parser.parse();
-    parser.print();
-    try std.testing.expectEqual(6, parser.nodes.items.len);
+    try std.testing.expectEqual(5, parser.nodes.items.len);
+    const root = parser.getNode(parser.root);
+    try std.testing.expect(root.* == .infix_expression);
+    try std.testing.expect(root.infix_expression == .conditional);
 
     try parser.reset("(x -> z) -> z -> (x)");
     parser.parse();
@@ -383,9 +495,34 @@ test "and / or" {
     try std.testing.expectEqualStrings("x", parser.getNode(conj.left).atom.symbol.getLiteral(parser.lexer.input));
 }
 
-test "printing" {
-    var parser = try Parser.init("(x ^ y) v x", std.testing.allocator);
+test "complex precedence" {
+    // Test complex expression with all operators
+    var parser = try Parser.init("\\forall x ~P(x) -> Q(x) ^ R(x)", std.testing.allocator);
     defer parser.deinit();
     parser.parse();
-    parser.print();
+
+    //    parser.print();
+
+    // Should parse as: (∀x(~P(x))) -> (Q(x) ∧ R(x))
+    const root = parser.getNode(parser.root);
+    try std.testing.expect(root.* == .infix_expression);
+    try std.testing.expect(root.infix_expression == .conditional);
+
+    // Test that quantifiers bind tighter than operators
+    try parser.reset("\\forall x P(x) ^ \\exists y Q(y)");
+    parser.parse();
+
+    // Should parse as: (∀x P(x)) ∧ (∃y Q(y))
+    const root2 = parser.getNode(parser.root);
+    try std.testing.expect(root2.* == .infix_expression);
+    try std.testing.expect(root2.infix_expression == .conjunction);
+
+    // Test that negation binds tighter than binary operators
+    try parser.reset("~P(x) ^ ~Q(x)");
+    parser.parse();
+
+    // Should parse as: (~P(x)) ∧ (~Q(x))
+    const root3 = parser.getNode(parser.root);
+    try std.testing.expect(root3.* == .infix_expression);
+    try std.testing.expect(root3.infix_expression == .conjunction);
 }

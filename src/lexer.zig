@@ -55,6 +55,19 @@ pub const Lexer = struct {
 
             return input[self.start_pos..self.end_pos];
         }
+
+        pub fn getPrecedence(self: *const Token) u4 {
+            return switch (self.type) {
+                .LPAREN => 7, //P(x)
+                .FORALL, .EXISTS => 6,
+                .NEG => 5,
+                .AND => 4,
+                .OR => 4,
+                .IF => 3,
+                .IFF => 2,
+                else => 0,
+            };
+        }
     };
 
     //src input to lex
@@ -86,7 +99,12 @@ pub const Lexer = struct {
             self.is_eof = true;
         };
 
-        if (self.is_eof) return Token{ .start_pos = @truncate(self.input.len), .end_pos = @truncate(self.input.len), .type = .EOF };
+        if (self.is_eof) return Token{
+            .start_pos = @truncate(self.input.len),
+            .end_pos = @truncate(self.input.len),
+            .type = .EOF,
+        };
+
         const t_type = switch (self.current_char) {
             '(' => self.buildToken(.LPAREN),
             ')' => self.buildToken(.RPAREN),
@@ -113,8 +131,8 @@ pub const Lexer = struct {
             },
         };
 
-        self.readChar() catch |err| switch (err) {
-            error.EOF => self.is_eof = true,
+        self.readChar() catch {
+            self.is_eof = true;
         };
 
         return t_type;

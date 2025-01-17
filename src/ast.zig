@@ -9,6 +9,7 @@ pub const Node = union(enum) {
     negation: Negation,
     infix_expression: InfixExpression,
     block_expression: BlockExpression,
+    quantifier: Quantifier,
     eof: Eof,
 };
 
@@ -80,4 +81,11 @@ pub const Conditional = struct {
     right: usize, //expression right of ->
 
     symbol: Token, //might not be needed?
+};
+
+// In ast.zig, add the Quantifier node type:
+pub const Quantifier = struct {
+    symbol: Token, // The quantifier token (∀ or ∃)
+    variable: Token, // The bound variable
+    expression: usize, // The expression that follows
 };
